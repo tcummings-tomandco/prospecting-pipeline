@@ -92,10 +92,28 @@ def enrich_person(person):
                 "email": "", "email_status": "", "phone": "", "linkedin": ""}
 
 
+def _find_column(df, candidates):
+    """Find the first matching column name (case-insensitive)."""
+    col_map = {c.lower().strip(): c for c in df.columns}
+    for name in candidates:
+        if name.lower() in col_map:
+            return col_map[name.lower()]
+    return None
+
+
 def enrich_companies(df, category, on_progress=None, contacts_per_company=3):
     """Enrich a DataFrame of companies. Calls on_progress(idx, total, company, message) per step.
     Returns a DataFrame of results.
     """
+    # Flexible column matching
+    company_col = _find_column(df, ["Company", "Company Name", "Name", "Organisation", "Organization"])
+    website_col = _find_column(df, ["Website", "Domain", "URL", "Web", "Site"])
+
+    if not company_col:
+        raise ValueError(f"No 'Company' column found. Columns in file: {list(df.columns)}")
+    if not website_col:
+        raise ValueError(f"No 'Website' column found. Columns in file: {list(df.columns)}")
+
     results = []
     total = len(df)
 
@@ -104,13 +122,13 @@ def enrich_companies(df, category, on_progress=None, contacts_per_company=3):
             on_progress(idx, total, company, message)
 
     for idx, row in df.iterrows():
-        company = row["Company"]
-        domain = clean_domain(row["Website"])
+        company = row[company_col]
+        domain = clean_domain(row[website_col])
         log(idx, company, f"Processing {company} ({domain or 'no domain'})")
 
         if not domain:
             results.append({
-                "Company": company, "Website": row["Website"],
+                "Company": company, "Website": row[website_col],
                 "First Name": "", "Last Name": "", "Title": "", "Email": "",
                 "Email Status": "", "Phone": "", "LinkedIn": "",
                 "Search Type": "no domain", "Category": category,
@@ -123,7 +141,7 @@ def enrich_companies(df, category, on_progress=None, contacts_per_company=3):
         if not people:
             log(idx, company, f"  No contacts found for {company}")
             results.append({
-                "Company": company, "Website": row["Website"],
+                "Company": company, "Website": row[website_col],
                 "First Name": "", "Last Name": "", "Title": "", "Email": "",
                 "Email Status": "", "Phone": "", "LinkedIn": "",
                 "Search Type": "none found", "Category": category,
@@ -142,7 +160,7 @@ def enrich_companies(df, category, on_progress=None, contacts_per_company=3):
             last = enriched["last_name"]
             results.append({
                 "Company": company,
-                "Website": row["Website"],
+                "Website": row[website_col],
                 "First Name": first,
                 "Last Name": last,
                 "Title": title,

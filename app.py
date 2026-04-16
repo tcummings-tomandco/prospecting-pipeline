@@ -102,10 +102,20 @@ with tab_enrich:
     if uploaded:
         try:
             preview_df = pd.read_excel(uploaded)
-            st.success(f"Loaded **{len(preview_df)} companies** from {uploaded.name}")
 
-            with st.expander("Preview input", expanded=False):
-                st.dataframe(preview_df, use_container_width=True, height=200)
+            # Validate columns
+            cols_lower = [c.lower().strip() for c in preview_df.columns]
+            has_company = any(c in cols_lower for c in ["company", "company name", "name", "organisation", "organization"])
+            has_website = any(c in cols_lower for c in ["website", "domain", "url", "web", "site"])
+
+            if not has_company or not has_website:
+                st.error(f"File needs a 'Company' and 'Website' column. Found: {list(preview_df.columns)}")
+                preview_df = None
+            else:
+                st.success(f"Loaded **{len(preview_df)} companies** from {uploaded.name}")
+
+                with st.expander("Preview input", expanded=False):
+                    st.dataframe(preview_df, use_container_width=True, height=200)
 
             # Reset pointer for re-reading
             uploaded.seek(0)
