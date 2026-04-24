@@ -22,7 +22,7 @@ from pipedrive_push import push_to_pipedrive, prepare_contacts
 
 # --- Page setup ---
 st.set_page_config(
-    page_title="Prospecting Pipeline",
+    page_title="Enrich Contacts",
     page_icon="🎯",
     layout="wide",
 )
@@ -68,7 +68,7 @@ st.sidebar.markdown("""
 
 
 # --- Main header ---
-st.title("🎯 Prospecting Pipeline")
+st.title("🎯 Enrich Contacts")
 st.caption("Enrich company lists with Apollo and push contacts to Pipedrive.")
 
 
