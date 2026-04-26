@@ -1,0 +1,10 @@
+.env
+.git
+.gitignore
+__pycache__/
+*.pyc
+.DS_Store
+*.xlsx
+.streamlit/secrets.toml
+README.md
+Launch App.command
