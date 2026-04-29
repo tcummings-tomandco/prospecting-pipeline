@@ -16,7 +16,7 @@ load_dotenv()
 import pandas as pd
 import streamlit as st
 
-from apollo_enrich import enrich_companies, save_enriched_excel
+from apollo_enrich import enrich_companies, save_enriched_excel, ROLE_PROFILES, DEFAULT_PROFILE
 from pipedrive_push import push_to_pipedrive, prepare_contacts
 
 
@@ -127,6 +127,57 @@ with tab_enrich:
 
     st.divider()
 
+    # --- Role profile selector ---
+    st.markdown("### 🎯 Who to target")
+
+    profile_names = list(ROLE_PROFILES.keys())
+    selected_profile = st.selectbox(
+        "Role profile",
+        profile_names,
+        index=profile_names.index(DEFAULT_PROFILE),
+        help="Choose which job titles to search for. The script tries 'primary' titles first, then falls back to broader 'fallback' titles if no contacts found.",
+    )
+
+    profile_data = ROLE_PROFILES[selected_profile]
+    st.caption(profile_data["description"])
+
+    # Allow customising the titles
+    customise = st.checkbox("Customise titles for this run", value=False)
+
+    if customise:
+        col_p, col_f = st.columns(2)
+        with col_p:
+            primary_text = st.text_area(
+                "Primary titles (one per line)",
+                value="\n".join(profile_data["primary"]),
+                height=180,
+                help="Tried first. Most specific to your target role.",
+            )
+        with col_f:
+            fallback_text = st.text_area(
+                "Fallback titles (one per line)",
+                value="\n".join(profile_data["fallback"]),
+                height=180,
+                help="Used only if no contacts found with primary titles.",
+            )
+        custom_primary = [t.strip() for t in primary_text.splitlines() if t.strip()]
+        custom_fallback = [t.strip() for t in fallback_text.splitlines() if t.strip()]
+    else:
+        custom_primary = None
+        custom_fallback = None
+        with st.expander("View titles for this profile"):
+            cP, cF = st.columns(2)
+            with cP:
+                st.markdown("**Primary**")
+                for t in profile_data["primary"]:
+                    st.text(f"• {t}")
+            with cF:
+                st.markdown("**Fallback**")
+                for t in profile_data["fallback"]:
+                    st.text(f"• {t}")
+
+    st.divider()
+
     # --- Enrich button ---
     enrich_disabled = not (uploaded and category_input and apollo_ok and preview_df is not None)
     if st.button("🚀 Enrich with Apollo", type="primary", disabled=enrich_disabled, use_container_width=True):
@@ -144,7 +195,13 @@ with tab_enrich:
         try:
             uploaded.seek(0)
             df = pd.read_excel(uploaded)
-            result_df = enrich_companies(df, category_input, on_progress=on_progress)
+            result_df = enrich_companies(
+                df, category_input,
+                on_progress=on_progress,
+                profile_name=selected_profile,
+                primary_titles=custom_primary,
+                fallback_titles=custom_fallback,
+            )
             st.session_state.enriched_df = result_df
             st.session_state.enriched_filename = uploaded.name.replace(".xlsx", " - Enriched.xlsx")
             progress_bar.progress(1.0, text="Done!")

@@ -6,19 +6,65 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 BASE = "https://api.apollo.io/api/v1"
 
-PRIMARY_TITLES = [
-    "ecommerce manager", "ecommerce director", "head of ecommerce",
-    "vp ecommerce", "director of ecommerce", "digital director",
-    "head of digital", "director of digital", "chief digital officer",
-    "chief marketing officer", "head of online", "online director",
-    "vp digital", "director of online sales",
-]
+# Role profiles — each defines who to target.
+# Primary = roles to try first. Fallback = broader decision-makers used if primary returns nothing.
+ROLE_PROFILES = {
+    "Ecommerce Decision Makers": {
+        "description": "Ecommerce Managers, Directors, Heads of Digital — for retail/DTC prospecting.",
+        "primary": [
+            "ecommerce manager", "ecommerce director", "head of ecommerce",
+            "vp ecommerce", "director of ecommerce", "digital director",
+            "head of digital", "director of digital", "chief digital officer",
+            "chief marketing officer", "head of online", "online director",
+            "vp digital", "director of online sales",
+        ],
+        "fallback": [
+            "managing director", "owner", "founder", "ceo", "general manager",
+            "marketing manager", "head of marketing", "marketing director",
+            "commercial director", "operations director", "sales director",
+        ],
+    },
+    "AI Agency Targeting": {
+        "description": "Managing Partners, Heads of Technical, Ops Directors — for B2B agency/consulting prospects.",
+        "primary": [
+            "managing partner", "head of technical", "head of technology",
+            "operations director", "head of operations", "chief operating officer",
+            "chief technology officer", "head of ai", "head of innovation",
+            "innovation director", "transformation director", "head of digital transformation",
+            "vp engineering", "head of engineering", "director of operations",
+        ],
+        "fallback": [
+            "managing director", "owner", "founder", "ceo", "partner",
+            "general manager", "director", "principal",
+        ],
+    },
+    "Marketing & Brand": {
+        "description": "CMOs, Marketing Directors, Heads of Brand — for marketing-led pitches.",
+        "primary": [
+            "chief marketing officer", "marketing director", "head of marketing",
+            "vp marketing", "director of marketing", "head of brand",
+            "brand director", "head of growth", "growth director",
+            "head of communications", "communications director",
+        ],
+        "fallback": [
+            "managing director", "owner", "founder", "ceo", "general manager",
+            "head of digital", "commercial director",
+        ],
+    },
+    "Senior Decision Makers (General)": {
+        "description": "Founders, CEOs, MDs, Directors — broad C-suite/leadership across any industry.",
+        "primary": [
+            "ceo", "managing director", "founder", "co-founder", "owner",
+            "president", "managing partner", "chief executive officer",
+        ],
+        "fallback": [
+            "director", "vp", "chief operating officer", "general manager",
+            "head of", "partner",
+        ],
+    },
+}
 
-FALLBACK_TITLES = [
-    "managing director", "owner", "founder", "ceo", "general manager",
-    "marketing manager", "head of marketing", "marketing director",
-    "commercial director", "operations director", "sales director",
-]
+DEFAULT_PROFILE = "Ecommerce Decision Makers"
 
 SENIORITIES = ["owner", "founder", "c_suite", "vp", "director", "manager"]
 
@@ -47,11 +93,11 @@ def clean_domain(website):
     return w if w and "." in w else None
 
 
-def search_people(domain):
-    """Search Apollo for ecommerce decision-makers at a domain, with fallback."""
+def search_people(domain, primary_titles, fallback_titles):
+    """Search Apollo for matching titles at a domain, with fallback."""
     payload = {
         "q_organization_domains_list": [domain],
-        "person_titles": PRIMARY_TITLES,
+        "person_titles": primary_titles,
         "person_seniorities": SENIORITIES,
         "page": 1,
         "per_page": 10,
@@ -63,8 +109,11 @@ def search_people(domain):
         if people:
             return people, "primary"
 
+        if not fallback_titles:
+            return [], "fallback"
+
         time.sleep(0.3)
-        payload["person_titles"] = FALLBACK_TITLES
+        payload["person_titles"] = fallback_titles
         r = requests.post(f"{BASE}/mixed_people/api_search", headers=_headers(), json=payload)
         r.raise_for_status()
         return r.json().get("people", []), "fallback"
@@ -103,10 +152,26 @@ def _find_column(df, candidates):
     return None
 
 
-def enrich_companies(df, category, on_progress=None, contacts_per_company=3):
+def enrich_companies(df, category, on_progress=None, contacts_per_company=3,
+                     primary_titles=None, fallback_titles=None, profile_name=None):
     """Enrich a DataFrame of companies. Calls on_progress(idx, total, company, message) per step.
+
+    Targeting:
+    - profile_name: name of a preset in ROLE_PROFILES (used if primary_titles not given)
+    - primary_titles / fallback_titles: explicit lists of titles to target (override profile)
+
     Returns a DataFrame of results.
     """
+    # Resolve targeting
+    if primary_titles is None:
+        profile = ROLE_PROFILES.get(profile_name or DEFAULT_PROFILE, ROLE_PROFILES[DEFAULT_PROFILE])
+        primary_titles = profile["primary"]
+        if fallback_titles is None:
+            fallback_titles = profile["fallback"]
+
+    if fallback_titles is None:
+        fallback_titles = []
+
     # Flexible column matching
     company_col = _find_column(df, ["Company", "Company Name", "Name", "Organisation", "Organization"])
     website_col = _find_column(df, ["Website", "Domain", "URL", "Web", "Site"])
@@ -137,7 +202,7 @@ def enrich_companies(df, category, on_progress=None, contacts_per_company=3):
             })
             continue
 
-        people, search_type = search_people(domain)
+        people, search_type = search_people(domain, primary_titles, fallback_titles)
         time.sleep(0.3)
 
         if not people:
@@ -220,6 +285,9 @@ def main():
     parser.add_argument("input_file", help="Excel file with Company and Website columns")
     parser.add_argument("--category", "-c", default=None,
                         help="Category label (e.g. 'Furniture'). Defaults to filename stem.")
+    parser.add_argument("--profile", "-p", default=DEFAULT_PROFILE,
+                        choices=list(ROLE_PROFILES.keys()),
+                        help="Role profile to target. Default: 'Ecommerce Decision Makers'.")
     args = parser.parse_args()
 
     input_file = args.input_file
@@ -228,12 +296,13 @@ def main():
 
     df = pd.read_excel(input_file)
     print(f"Loaded {len(df)} companies from {input_file}")
-    print(f"Category: {category}\n")
+    print(f"Category: {category}")
+    print(f"Profile: {args.profile}\n")
 
     def on_progress(idx, total, company, message):
         print(f"[{idx+1}/{total}] {message}")
 
-    result_df = enrich_companies(df, category, on_progress=on_progress)
+    result_df = enrich_companies(df, category, on_progress=on_progress, profile_name=args.profile)
     save_enriched_excel(result_df, output_file)
 
     print(f"\nDone! {len(result_df)} rows written to {output_file}")
