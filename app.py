@@ -302,6 +302,7 @@ with tab_push:
             st.metric("🔁 Persons updated", s.get("persons_existing", 0))
         with c3:
             st.metric("🎯 Leads created", s.get("leads_created", 0))
+            st.metric("🔁 Leads existing", s.get("leads_existing", 0))
             st.metric("❌ Errors", s.get("errors", 0))
 
         if s.get("messages"):

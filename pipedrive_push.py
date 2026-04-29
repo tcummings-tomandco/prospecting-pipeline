@@ -136,6 +136,21 @@ def search_person_by_email(email):
     return None
 
 
+def search_lead_for_org(org_id, title):
+    """Check if an open lead already exists for this org with matching title."""
+    if not org_id:
+        return None
+    cfg = _config()
+    try:
+        data = api_get(f"{cfg['base_v1']}/leads", {"organization_id": org_id, "archived_status": "not_archived"})
+        for lead in data.get("data", []) or []:
+            if lead.get("title", "").lower() == title.lower():
+                return lead["id"]
+    except Exception:
+        pass
+    return None
+
+
 # --- Create / update ---
 
 def create_org(name, org_label_id):
@@ -229,8 +244,8 @@ def push_to_pipedrive(df, category, on_progress=None):
     field_keys["linkedin"] = ensure_linkedin_field()
 
     stats = {"orgs_created": 0, "orgs_existing": 0, "persons_created": 0,
-             "persons_existing": 0, "leads_created": 0, "errors": 0,
-             "messages": []}
+             "persons_existing": 0, "leads_created": 0, "leads_existing": 0,
+             "errors": 0, "messages": []}
 
     for comp_idx, (company, rows) in enumerate(grouped):
         log(comp_idx, f"[{comp_idx+1}/{total}] {company}")
@@ -274,9 +289,13 @@ def push_to_pipedrive(df, category, on_progress=None):
                     first_person_id = person_id
                 time.sleep(0.2)
 
-            # Lead
-            create_lead(company, first_person_id, org_id, lead_label_id)
-            stats["leads_created"] += 1
+            # Lead — dedupe by org + title to avoid creating duplicates on re-run
+            existing_lead = search_lead_for_org(org_id, company)
+            if existing_lead:
+                stats["leads_existing"] += 1
+            else:
+                create_lead(company, first_person_id, org_id, lead_label_id)
+                stats["leads_created"] += 1
             time.sleep(0.2)
 
         except Exception as e:
