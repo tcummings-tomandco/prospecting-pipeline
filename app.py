@@ -9,7 +9,9 @@ Run locally:  streamlit run app.py
 import io
 import os
 import tempfile
+import time
 import traceback
+from functools import partial
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -18,6 +20,9 @@ import streamlit as st
 
 from apollo_enrich import enrich_companies, save_enriched_excel, ROLE_PROFILES, DEFAULT_PROFILE
 from pipedrive_push import push_to_pipedrive, prepare_contacts
+from job_state import (
+    create_job, get_job, update_progress, run_in_background, clear_job, list_active_jobs,
+)
 
 
 # --- Page setup ---
@@ -44,6 +49,20 @@ if "push_stats" not in st.session_state:
     st.session_state.push_stats = None
 if "category" not in st.session_state:
     st.session_state.category = ""
+if "enrich_job_id" not in st.session_state:
+    st.session_state.enrich_job_id = None
+if "push_job_id" not in st.session_state:
+    st.session_state.push_job_id = None
+
+# If browser was refreshed mid-run, recover any active job
+if st.session_state.enrich_job_id is None:
+    active = list_active_jobs(kind="enrich")
+    if active:
+        st.session_state.enrich_job_id = active[0]
+if st.session_state.push_job_id is None:
+    active = list_active_jobs(kind="push")
+    if active:
+        st.session_state.push_job_id = active[0]
 
 
 # --- Sidebar: status of keys ---
@@ -178,37 +197,73 @@ with tab_enrich:
 
     st.divider()
 
-    # --- Enrich button ---
-    enrich_disabled = not (uploaded and category_input and apollo_ok and preview_df is not None)
-    if st.button("🚀 Enrich with Apollo", type="primary", disabled=enrich_disabled, use_container_width=True):
-        progress_bar = st.progress(0.0, text="Starting...")
-        log_area = st.empty()
-        log_messages = []
+    # --- Enrich button + background job handling ---
+    active_job_id = st.session_state.enrich_job_id
+    active_job = get_job(active_job_id) if active_job_id else None
+    has_active_job = active_job and active_job["status"] in ("pending", "running")
 
-        def on_progress(idx, total, company, message):
-            pct = (idx + 1) / total if total else 1.0
-            progress_bar.progress(min(pct, 1.0), text=f"[{idx+1}/{total}] {company}")
-            log_messages.append(message)
-            # Show last 10 messages
-            log_area.code("\n".join(log_messages[-10:]), language=None)
+    enrich_disabled = (
+        has_active_job
+        or not (uploaded and category_input and apollo_ok and preview_df is not None)
+    )
 
-        try:
-            uploaded.seek(0)
-            df = pd.read_excel(uploaded)
-            result_df = enrich_companies(
-                df, category_input,
+    btn_label = "🚀 Enrich with Apollo"
+    if has_active_job:
+        btn_label = "⏳ Enrichment in progress..."
+
+    if st.button(btn_label, type="primary", disabled=enrich_disabled, use_container_width=True):
+        # Snapshot inputs before launching the thread (Streamlit objects can't be used in workers)
+        uploaded.seek(0)
+        df = pd.read_excel(uploaded)
+        filename = uploaded.name.replace(".xlsx", " - Enriched.xlsx")
+        st.session_state.enriched_filename = filename
+
+        job_id = create_job(kind="enrich")
+        st.session_state.enrich_job_id = job_id
+
+        def worker(_df=df, _category=category_input, _profile=selected_profile,
+                   _primary=custom_primary, _fallback=custom_fallback, _job_id=job_id):
+            def on_progress(idx, total, company, message):
+                update_progress(_job_id, idx, total, company, message)
+            return enrich_companies(
+                _df, _category,
                 on_progress=on_progress,
-                profile_name=selected_profile,
-                primary_titles=custom_primary,
-                fallback_titles=custom_fallback,
+                profile_name=_profile,
+                primary_titles=_primary,
+                fallback_titles=_fallback,
             )
-            st.session_state.enriched_df = result_df
-            st.session_state.enriched_filename = uploaded.name.replace(".xlsx", " - Enriched.xlsx")
-            progress_bar.progress(1.0, text="Done!")
-            st.success(f"✅ Enrichment complete — {len(result_df)} rows")
-        except Exception as e:
-            st.error(f"Enrichment failed: {e}")
-            st.code(traceback.format_exc())
+
+        run_in_background(job_id, worker)
+        st.rerun()
+
+    # Show progress for active job
+    if has_active_job:
+        st.info("✨ Enrichment running in the background — you can switch tabs and come back. Progress updates every few seconds.")
+        pct = active_job["progress"] / active_job["total"] if active_job["total"] else 0.0
+        progress_text = f"[{active_job['progress']}/{active_job['total']}] {active_job['current']}" if active_job["total"] else "Starting..."
+        st.progress(min(pct, 1.0), text=progress_text)
+        if active_job["messages"]:
+            st.code("\n".join(active_job["messages"][-10:]), language=None)
+        # Auto-refresh every 3 seconds while running
+        time.sleep(3)
+        st.rerun()
+
+    # Handle finished jobs
+    if active_job and active_job["status"] == "complete" and active_job["result"] is not None:
+        if st.session_state.enriched_df is None or len(st.session_state.enriched_df) != len(active_job["result"]):
+            st.session_state.enriched_df = active_job["result"]
+            st.success(f"✅ Enrichment complete — {len(active_job['result'])} rows")
+            # Clear job from memory once we've consumed it
+            clear_job(active_job_id)
+            st.session_state.enrich_job_id = None
+            st.rerun()
+
+    if active_job and active_job["status"] == "failed":
+        st.error(f"Enrichment failed: {active_job['error']}")
+        if st.button("Dismiss error"):
+            clear_job(active_job_id)
+            st.session_state.enrich_job_id = None
+            st.rerun()
 
     # --- Enriched summary ---
     if st.session_state.enriched_df is not None:
@@ -323,26 +378,54 @@ with tab_push:
 
             st.divider()
 
-            push_disabled = not (pipedrive_ok and push_category)
-            if st.button("📤 Push to Pipedrive", type="primary", disabled=push_disabled, use_container_width=True):
-                progress_bar = st.progress(0.0, text="Starting...")
-                log_area = st.empty()
-                log_messages = []
+            push_active_id = st.session_state.push_job_id
+            push_active = get_job(push_active_id) if push_active_id else None
+            push_in_progress = push_active and push_active["status"] in ("pending", "running")
 
-                def on_progress(i, total, msg):
-                    pct = (i + 1) / total if total else 1.0
-                    progress_bar.progress(min(pct, 1.0), text=msg)
-                    log_messages.append(msg)
-                    log_area.code("\n".join(log_messages[-10:]), language=None)
+            push_disabled = push_in_progress or not (pipedrive_ok and push_category)
+            push_btn_label = "📤 Push to Pipedrive"
+            if push_in_progress:
+                push_btn_label = "⏳ Push in progress..."
 
-                try:
-                    stats = push_to_pipedrive(push_df, push_category, on_progress=on_progress)
-                    st.session_state.push_stats = stats
-                    progress_bar.progress(1.0, text="Done!")
-                    st.success("✅ Push complete")
-                except Exception as e:
-                    st.error(f"Push failed: {e}")
-                    st.code(traceback.format_exc())
+            if st.button(push_btn_label, type="primary", disabled=push_disabled, use_container_width=True):
+                # Snapshot inputs
+                df_snap = push_df.copy()
+                cat_snap = push_category
+
+                job_id = create_job(kind="push")
+                st.session_state.push_job_id = job_id
+
+                def push_worker(_df=df_snap, _cat=cat_snap, _job_id=job_id):
+                    def on_progress(i, total, msg):
+                        update_progress(_job_id, i, total, "", msg)
+                    return push_to_pipedrive(_df, _cat, on_progress=on_progress)
+
+                run_in_background(job_id, push_worker)
+                st.rerun()
+
+            if push_in_progress:
+                st.info("✨ Push running in the background — you can switch tabs and come back.")
+                pct = push_active["progress"] / push_active["total"] if push_active["total"] else 0.0
+                progress_text = push_active["messages"][-1] if push_active["messages"] else "Starting..."
+                st.progress(min(pct, 1.0), text=progress_text)
+                if push_active["messages"]:
+                    st.code("\n".join(push_active["messages"][-10:]), language=None)
+                time.sleep(3)
+                st.rerun()
+
+            if push_active and push_active["status"] == "complete" and push_active["result"] is not None:
+                st.session_state.push_stats = push_active["result"]
+                st.success("✅ Push complete")
+                clear_job(push_active_id)
+                st.session_state.push_job_id = None
+                st.rerun()
+
+            if push_active and push_active["status"] == "failed":
+                st.error(f"Push failed: {push_active['error']}")
+                if st.button("Dismiss push error"):
+                    clear_job(push_active_id)
+                    st.session_state.push_job_id = None
+                    st.rerun()
 
     # --- Push summary ---
     if st.session_state.push_stats is not None:
