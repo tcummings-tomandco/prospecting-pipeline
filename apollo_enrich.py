@@ -69,6 +69,7 @@ def search_people(domain):
         r.raise_for_status()
         return r.json().get("people", []), "fallback"
     except requests.exceptions.RequestException as e:
+        print(f"[APOLLO SEARCH] error for {domain}: {e}", flush=True)
         return [], f"error: {e}"
 
 
@@ -87,7 +88,8 @@ def enrich_person(person):
             "phone": (p.get("phone_numbers") or [{}])[0].get("sanitized_number", "") if p.get("phone_numbers") else "",
             "linkedin": p.get("linkedin_url", ""),
         }
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
+        print(f"[APOLLO ENRICH] error for {person.get('id', 'unknown')}: {e}", flush=True)
         return {"first_name": person.get("first_name", ""), "last_name": person.get("last_name", ""),
                 "email": "", "email_status": "", "phone": "", "linkedin": ""}
 

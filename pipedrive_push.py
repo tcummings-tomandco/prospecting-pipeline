@@ -299,10 +299,14 @@ def push_to_pipedrive(df, category, on_progress=None):
             time.sleep(0.2)
 
         except Exception as e:
+            import traceback
             msg = f"ERROR on {company}: {e}"
             stats["errors"] += 1
             stats["messages"].append(msg)
             log(comp_idx, msg)
+            # Also print to stdout so it shows up in Cloud Run logs
+            print(f"[PIPEDRIVE PUSH] {msg}", flush=True)
+            print(traceback.format_exc(), flush=True)
 
     return stats
 
