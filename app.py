@@ -23,6 +23,9 @@ from pipedrive_push import push_to_pipedrive, prepare_contacts
 from job_state import (
     create_job, get_job, update_progress, run_in_background, clear_job, list_active_jobs,
 )
+from persistence import (
+    save_enrichment, load_enrichment, clear_enrichment, get_cached_metadata,
+)
 
 
 # --- Page setup ---
@@ -63,6 +66,16 @@ if st.session_state.push_job_id is None:
     active = list_active_jobs(kind="push")
     if active:
         st.session_state.push_job_id = active[0]
+
+# If session_state was wiped (page refresh, file uploader X) but a cached
+# enrichment exists on disk, restore it so the user doesn't lose work.
+if st.session_state.enriched_df is None:
+    cached_df, cached_meta = load_enrichment()
+    if cached_df is not None and cached_meta:
+        st.session_state.enriched_df = cached_df
+        st.session_state.enriched_filename = cached_meta.get("filename")
+        if cached_meta.get("category"):
+            st.session_state.category = cached_meta["category"]
 
 
 # --- Sidebar: status of keys ---
@@ -216,6 +229,11 @@ with tab_enrich:
         uploaded.seek(0)
         df = pd.read_excel(uploaded)
         filename = uploaded.name.replace(".xlsx", " - Enriched.xlsx")
+
+        # Starting a new enrichment — clear any previous completed result
+        if st.session_state.enrich_job_id:
+            clear_job(st.session_state.enrich_job_id)
+        st.session_state.enriched_df = None
         st.session_state.enriched_filename = filename
 
         job_id = create_job(kind="enrich")
@@ -248,15 +266,22 @@ with tab_enrich:
         time.sleep(3)
         st.rerun()
 
-    # Handle finished jobs
+    # Handle finished jobs — load into session_state and persist to disk
     if active_job and active_job["status"] == "complete" and active_job["result"] is not None:
-        if st.session_state.enriched_df is None or len(st.session_state.enriched_df) != len(active_job["result"]):
-            st.session_state.enriched_df = active_job["result"]
-            st.success(f"✅ Enrichment complete — {len(active_job['result'])} rows")
-            # Clear job from memory once we've consumed it
-            clear_job(active_job_id)
-            st.session_state.enrich_job_id = None
-            st.rerun()
+        result_df = active_job["result"]
+        if st.session_state.enriched_df is None or len(st.session_state.enriched_df) != len(result_df):
+            st.session_state.enriched_df = result_df
+            try:
+                save_enrichment(
+                    result_df,
+                    filename=st.session_state.enriched_filename or "Enriched.xlsx",
+                    category=category_input or st.session_state.category,
+                )
+            except Exception as e:
+                print(f"[PERSISTENCE] Save failed: {e}", flush=True)
+            st.success(f"✅ Enrichment complete — {len(result_df)} rows")
+            # Note: we deliberately do NOT clear the job here. The result stays
+            # in _jobs (and on disk) until the user clicks "Start new enrichment".
 
     if active_job and active_job["status"] == "failed":
         st.error(f"Enrichment failed: {active_job['error']}")
@@ -268,7 +293,30 @@ with tab_enrich:
     # --- Enriched summary ---
     if st.session_state.enriched_df is not None:
         st.divider()
-        st.subheader("📊 Enrichment Summary")
+
+        # Header row with title + "Start new" button
+        head_l, head_r = st.columns([3, 1])
+        with head_l:
+            st.subheader("📊 Enrichment Summary")
+            cached_meta = get_cached_metadata()
+            if cached_meta:
+                from datetime import datetime
+                saved_at = cached_meta.get("saved_at", "")
+                if saved_at:
+                    try:
+                        ts = datetime.fromisoformat(saved_at).strftime("%H:%M on %d %b")
+                        st.caption(f"💾 Auto-saved — last enrichment from **{ts}** ({cached_meta.get('rows', 0)} rows). Stays here until you start a new one.")
+                    except Exception:
+                        pass
+        with head_r:
+            if st.button("🆕 Start new enrichment", use_container_width=True, help="Clears the current results so you can run a fresh enrichment."):
+                st.session_state.enriched_df = None
+                st.session_state.enriched_filename = None
+                if st.session_state.enrich_job_id:
+                    clear_job(st.session_state.enrich_job_id)
+                    st.session_state.enrich_job_id = None
+                clear_enrichment()
+                st.rerun()
 
         df = st.session_state.enriched_df
         total_rows = len(df)
