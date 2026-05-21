@@ -128,17 +128,50 @@ def enrich_person(person):
     try:
         r = requests.post(f"{BASE}/people/match", headers=_headers(), json=payload)
         r.raise_for_status()
-        p = r.json().get("person", {})
+        body = r.json()
+        p = body.get("person", {}) or {}
+
+        email = p.get("email", "") or ""
+        email_status = p.get("email_status", "") or ""
+        personal_emails = p.get("personal_emails", []) or []
+
+        # If no work email, fall back to first personal email
+        if not email and personal_emails:
+            email = personal_emails[0]
+
+        # Detect Apollo's "credits exhausted" placeholder
+        is_locked = bool(email) and (
+            "email_not_unlocked" in email.lower()
+            or "domain.com" == email.split("@")[-1].lower() if "@" in email else False
+        )
+        if is_locked:
+            print(f"[APOLLO ENRICH] WARNING: email looks locked/placeholder for {p.get('first_name', '')} {p.get('last_name', '')} — got '{email}'. Likely out of Apollo credits.", flush=True)
+            email = ""
+
+        # If we got a valid response but no email at all, log the keys we did get
+        if not email:
+            response_keys = list(body.keys())
+            person_keys = list(p.keys())
+            print(f"[APOLLO ENRICH] No email returned for id={person.get('id', '?')} name={p.get('first_name', '')} {p.get('last_name', '')}. "
+                  f"Response keys: {response_keys}. Person keys: {person_keys}. email_status={email_status} personal_emails={len(personal_emails)}",
+                  flush=True)
+
         return {
             "first_name": p.get("first_name", person.get("first_name", "")),
             "last_name": p.get("last_name", person.get("last_name", "")),
-            "email": p.get("email", ""),
-            "email_status": p.get("email_status", ""),
+            "email": email,
+            "email_status": email_status,
             "phone": (p.get("phone_numbers") or [{}])[0].get("sanitized_number", "") if p.get("phone_numbers") else "",
             "linkedin": p.get("linkedin_url", ""),
         }
     except requests.exceptions.RequestException as e:
-        print(f"[APOLLO ENRICH] error for {person.get('id', 'unknown')}: {e}", flush=True)
+        # Log the status code + body so we can see rate limit / auth issues
+        body_text = ""
+        try:
+            body_text = e.response.text[:500] if e.response is not None else ""
+        except Exception:
+            pass
+        print(f"[APOLLO ENRICH] HTTP error for {person.get('id', 'unknown')}: {e} | body: {body_text}", flush=True)
         return {"first_name": person.get("first_name", ""), "last_name": person.get("last_name", ""),
                 "email": "", "email_status": "", "phone": "", "linkedin": ""}
 
